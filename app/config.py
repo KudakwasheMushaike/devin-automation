@@ -36,7 +36,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "KudakwasheMushaike/superset-devin-d
 DEVIN_TRIGGER_LABEL = os.environ.get("DEVIN_TRIGGER_LABEL", "devin-task")
 
 # How often (in seconds) the background poller checks Devin session status.
-POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
+POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
 
 # Path to the SQLite database file used for observability.
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/data/tasks.db")
