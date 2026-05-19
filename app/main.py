@@ -103,43 +103,82 @@ Please proceed autonomously and open a pull request when complete.
 @app.post("/webhook/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     """
-    The main entry point — receives GitHub webhook events.
-
-    GitHub sends a POST request to this endpoint whenever
-    something happens in your repository. We configured it
-    to send 'issues' events.
-
-    We filter down to exactly one event type:
-    'labeled' + label name == 'devin-task'
-
-    Everything else is ignored immediately with a 200 OK
-    (GitHub expects a fast response or it retries).
+    Handles two GitHub webhook events:
+    1. issues.labeled → triggers a new Devin session
+    2. pull_request.opened by Devin → marks task as completed
     """
-    # Step 1: Read the raw body BEFORE parsing JSON
-    # We need the raw bytes to verify the HMAC signature.
     payload_bytes = await request.body()
 
-    # Step 2: Verify the webhook came from GitHub
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not github_client.verify_webhook_signature(payload_bytes, signature):
         logger.warning("Webhook signature verification failed — rejecting request")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # Step 3: Parse the JSON payload
     payload = await request.json()
-
-    # Step 4: Filter — only act on 'labeled' issue events
+    event_type = request.headers.get("X-GitHub-Event", "")
     action = payload.get("action")
+
+    # ── Handle Pull Request opened by Devin ──────────────────────────────────
+    if event_type == "pull_request" and action == "opened":
+        pr = payload.get("pull_request", {})
+        pr_url = pr.get("html_url", "")
+        pr_user = pr.get("user", {}).get("login", "")
+        pr_branch = pr.get("head", {}).get("ref", "")
+
+        # Only handle PRs opened by Devin
+        if "devin-ai-integration" not in pr_user:
+            return {"status": "ignored", "reason": "PR not from Devin"}
+
+        logger.info(f"Devin PR detected: {pr_url} branch={pr_branch}")
+
+        # Match PR to a running task via session ID in branch name
+        # Devin branch names look like: devin/1779138121-fix-flask-cve
+        # Our session IDs are stored as: devin-5772ca...
+        # We match by looking for running tasks and updating the most recent one
+        running_tasks = database.get_running_tasks()
+
+        matched_task = None
+        for task in running_tasks:
+            session_id = task.get("session_id", "")
+            # Check if session ID fragment appears in branch name
+            if session_id and session_id[:8] in pr_branch:
+                matched_task = task
+                break
+
+        # If no match by session ID, fall back to most recent running task
+        if not matched_task and running_tasks:
+            matched_task = running_tasks[0]
+            logger.warning(
+                f"Could not match PR to session by ID, "
+                f"falling back to most recent running task"
+            )
+
+        if matched_task:
+            task_id = matched_task["id"]
+            issue_number = matched_task["issue_number"]
+            session_url = matched_task.get("session_url", "")
+
+            database.update_task_completed(task_id, pr_url)
+            logger.info(f"[Task {task_id}] ✅ Marked completed via PR webhook: {pr_url}")
+
+            github_client.post_issue_comment(
+                issue_number,
+                github_client.build_completed_comment(pr_url, session_url)
+            )
+
+        return {"status": "accepted", "pr_url": pr_url}
+
+    # ── Handle Issue labeled ──────────────────────────────────────────────────
+    if event_type != "issues" and event_type != "":
+        return {"status": "ignored", "reason": f"event={event_type}"}
+
     if action != "labeled":
-        # Not a labeling event — ignore silently
         return {"status": "ignored", "reason": f"action={action}"}
 
-    # Step 5: Filter — only act on our specific trigger label
     label_name = payload.get("label", {}).get("name", "")
     if label_name != DEVIN_TRIGGER_LABEL:
         return {"status": "ignored", "reason": f"label={label_name}"}
 
-    # Step 6: Extract issue details
     issue = payload.get("issue", {})
     issue_number = issue.get("number")
     issue_title = issue.get("title", "")
@@ -148,13 +187,8 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
     logger.info(f"Trigger received for Issue #{issue_number}: {issue_title}")
 
-    # Step 7: Log the task to our database immediately
-    # Status is 'pending' until Devin accepts the session
     task_id = database.log_task(issue_number, issue_title, issue_url)
 
-    # Step 8: Hand off to background task and return immediately
-    # GitHub expects a response within 10 seconds.
-    # The actual Devin session creation and polling happens in the background.
     background_tasks.add_task(
         process_issue,
         task_id=task_id,
@@ -164,12 +198,7 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
         issue_url=issue_url
     )
 
-    return {
-        "status": "accepted",
-        "task_id": task_id,
-        "issue": issue_number
-    }
-
+    return {"status": "accepted", "task_id": task_id, "issue": issue_number}
 
 # ── Background Task ───────────────────────────────────────────────────────────
 async def process_issue(task_id: int, issue_number: int, issue_title: str,
@@ -216,7 +245,7 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
         # until the session reaches a terminal state.
         logger.info(f"[Task {task_id}] Polling session {session_id}...")
 
-        max_polls = 60  # 60 × 30s = 30 minutes max before we give up
+        max_polls = 60  # 60 × 60s = 60 minutes max before we give up
         polls = 0
 
         while polls < max_polls:
