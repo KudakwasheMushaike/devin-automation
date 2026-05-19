@@ -1,0 +1,12 @@
+services:
+  automation:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist the SQLite database outside the container
+      # So your task history survives container restarts
+      - ./data:/app/data
+    restart: unless-stopped
