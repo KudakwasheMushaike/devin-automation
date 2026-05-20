@@ -125,6 +125,7 @@ def update_task_failed(task_id: int, error_message: str):
                 finished_at   = datetime('now'),
                 error_message = ?
             WHERE id = ?
+            AND status != 'completed'
         """, (error_message, task_id))
         conn.commit()
 
