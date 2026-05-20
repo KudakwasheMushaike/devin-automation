@@ -252,6 +252,18 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
             polls += 1
 
+            # Check if PR webhook already completed this task
+            # If so, stop polling immediately
+            with database.get_connection() as conn:
+                current = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if current and current["status"] == "completed":
+                    logger.info(
+                        f"[Task {task_id}] Already completed via PR webhook, stopping poll"
+                    )
+                    return
+
             session_status = devin_client.get_session(session_id)
             status = session_status.get("status", "")
             status_detail = session_status.get("status_detail", "")
@@ -260,10 +272,12 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
                 f"[Task {task_id}] Poll {polls}: status={status} detail={status_detail}"
             )
 
+            # Check for PRs regardless of status — Devin may have
+            # opened a PR before the session reached a terminal state.
+            pr_url = devin_client.extract_pr_url(session_status)
+
             if status in ("completed", "exit"):
                 # ── Success ───────────────────────────────────────────────────
-                pr_url = devin_client.extract_pr_url(session_status)
-
                 if pr_url:
                     database.update_task_completed(task_id, pr_url)
                     github_client.post_issue_comment(
@@ -283,15 +297,51 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
                     logger.warning(f"[Task {task_id}] Session completed with no PR")
                 return
 
-            elif status in ("failed", "stopped", "error", "suspended"):
+            elif status == "suspended":
+                # ── Suspended — check if Devin already opened a PR ────────────
+                # Sessions go to "suspended" due to inactivity after finishing
+                # work. If a PR exists, the task succeeded.
+                if pr_url:
+                    database.update_task_completed(task_id, pr_url)
+                    github_client.post_issue_comment(
+                        issue_number,
+                        github_client.build_completed_comment(pr_url, session_url)
+                    )
+                    logger.info(
+                        f"[Task {task_id}] ✅ Completed (suspended with PR): {pr_url}"
+                    )
+                else:
+                    error = status_detail or "Session suspended without opening a PR"
+                    database.update_task_failed(task_id, error)
+                    github_client.post_issue_comment(
+                        issue_number,
+                        github_client.build_failed_comment(error, session_url)
+                    )
+                    logger.error(f"[Task {task_id}] ❌ Failed: {error}")
+                return
+
+            elif status in ("failed", "stopped", "error"):
                 # ── Failure ───────────────────────────────────────────────────
-                error = status_detail or f"Session ended with status: {status}"
-                database.update_task_failed(task_id, error)
-                github_client.post_issue_comment(
-                    issue_number,
-                    github_client.build_failed_comment(error, session_url)
-                )
-                logger.error(f"[Task {task_id}] ❌ Failed: {error}")
+                # Even for failed sessions, check if a PR was opened before
+                # the failure — partial work is still valuable.
+                if pr_url:
+                    database.update_task_completed(task_id, pr_url)
+                    github_client.post_issue_comment(
+                        issue_number,
+                        github_client.build_completed_comment(pr_url, session_url)
+                    )
+                    logger.info(
+                        f"[Task {task_id}] ✅ Completed (PR found despite "
+                        f"status={status}): {pr_url}"
+                    )
+                else:
+                    error = status_detail or f"Session ended with status: {status}"
+                    database.update_task_failed(task_id, error)
+                    github_client.post_issue_comment(
+                        issue_number,
+                        github_client.build_failed_comment(error, session_url)
+                    )
+                    logger.error(f"[Task {task_id}] ❌ Failed: {error}")
                 return
 
             # Still running — continue polling
@@ -360,4 +410,3 @@ def dashboard():
             return f.read()
     except FileNotFoundError:
         return "<h1>Dashboard not found</h1>"
-
