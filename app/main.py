@@ -252,6 +252,18 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
             polls += 1
 
+            # Check if PR webhook already completed this task
+            # If so, stop polling immediately
+            with database.get_connection() as conn:
+                current = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if current and current["status"] == "completed":
+                    logger.info(
+                        f"[Task {task_id}] Already completed via PR webhook, stopping poll"
+                    )
+                    return
+
             session_status = devin_client.get_session(session_id)
             status = session_status.get("status", "")
             status_detail = session_status.get("status_detail", "")
@@ -398,4 +410,3 @@ def dashboard():
             return f.read()
     except FileNotFoundError:
         return "<h1>Dashboard not found</h1>"
-
