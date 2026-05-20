@@ -241,7 +241,7 @@ async def process_issue(task_id: int, issue_number: int, issue_title: str,
         )
 
         # ── Poll for Completion ───────────────────────────────────────────────
-        # Devin sessions are async — we check the status every 30 seconds
+        # Devin sessions are async — we check the status every 60 seconds
         # until the session reaches a terminal state.
         logger.info(f"[Task {task_id}] Polling session {session_id}...")
 

@@ -5,8 +5,6 @@ Uses SQLite so there are zero external dependencies.
 Every Devin session we create gets a row in the `tasks` table.
 The dashboard reads from this table to show status, timing, and PR links.
 
-This directly answers the engineering leader question:
-"How do I know this is working?"
 """
 
 import sqlite3
